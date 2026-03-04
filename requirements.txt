@@ -1,0 +1,6 @@
+Pillow
+requests
+redis
+git+https://github.com/zai-org/glm-ocr.git
+git+https://github.com/huggingface/transformers.git
+redis
