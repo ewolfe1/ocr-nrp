@@ -10,6 +10,7 @@ import json
 import zipfile
 import os
 import sys
+import gc
 import shutil
 from pathlib import Path
 from datetime import datetime
@@ -80,29 +81,21 @@ logger = logging.getLogger(__name__)
 
 
 # get image from Islandora and return encoded string
-def get_encoded_image(pid, max_retries=5):
-
+def get_encoded_image(pid, max_retries=5, max_pixels=23500000):
     url = f'https://digital.lib.ku.edu/islandora/object/{pid}/datastream/OBJ/view'
     for attempt in range(max_retries):
         try:
             response = requests.get(url, timeout=60)
             response.raise_for_status()
-            #print(response.status_code)
             image = Image.open(io.BytesIO(response.content))
             if image.mode != 'RGB':
                 image = image.convert('RGB')
-
-            # if necessary, need to keep under max token limit of 6084
-            max_pixels = 23500000
             w, h = image.size
             if w * h > max_pixels:
                 scale = (max_pixels / (w * h)) ** 0.5
                 image = image.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
                 logger.info(f"Image resized from {w}x{h} to {int(w*scale)}x{int(h*scale)}")
-
             image_size = image.size
-
-
             buffer = io.BytesIO()
             image.save(buffer, format='JPEG', quality=95, optimize=True, subsampling=0)
             buffer.seek(0)
@@ -111,11 +104,10 @@ def get_encoded_image(pid, max_retries=5):
             buffer.close()
             logger.info("Image retrieved successfully")
             return image_encode, image_size
-
         except Exception as e:
-            if attempt == max_retries - 1:  # Last attempt
+            if attempt == max_retries - 1:
                 raise
-            time.sleep(5 ** attempt)  # Exponential backoff: 1s, 3s, 9s
+            time.sleep(5 ** attempt)
 
 # extract ocr and hocr from json
 def ocr_and_hocr(json_result, image_size, pid, page_id="page_1"):
@@ -139,7 +131,6 @@ def ocr_and_hocr(json_result, image_size, pid, page_id="page_1"):
         )
 
     ocr = '\n'.join(plaintext)
-
     body = "\n".join(lines)
     hocr = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
@@ -232,14 +223,22 @@ with GlmOcr(config_path="glmocr-config.yaml") as parser:
                     continue
 
                 pid = task['pid']
-
                 logger.info(f"Processing {pid} (task {processed_count + 1})")
 
-                # retrieve and encode image
-                image_enc, image_size = get_encoded_image(pid)
-
-                # process with glmocr
-                result = parser.parse(f"data:image/jpeg;base64,{image_enc}")
+                max_pixels = 23500000
+                while True:
+                    # retrieve and encode image
+                    image_enc, image_size = get_encoded_image(pid, max_pixels=max_pixels)
+                    try:
+                        # process with glmocr
+                        result = parser.parse(f"data:image/jpeg;base64,{image_enc}")
+                        break
+                    except Exception as e:
+                        if '6084' in str(e) or 'encoder cache' in str(e):
+                            max_pixels = int(max_pixels * 0.85)
+                            logger.info(f"Token limit hit, retrying with max_pixels={max_pixels}")
+                        else:
+                            raise
 
                 # save outputs
                 ocr_text, hocr_text = ocr_and_hocr(result.json_result[0], image_size, pid)
@@ -255,6 +254,7 @@ with GlmOcr(config_path="glmocr-config.yaml") as parser:
                 if result.layout_vis_dir:
                     shutil.rmtree(result.layout_vis_dir, ignore_errors=True)
                 del image_enc, result, vis
+                gc.collect()
 
                 # remove task from redis queue
                 complete_task(task)
