@@ -91,12 +91,24 @@ def get_encoded_image(pid, max_retries=5):
             image = Image.open(io.BytesIO(response.content))
             if image.mode != 'RGB':
                 image = image.convert('RGB')
+
+            # if necessary, need to keep under max token limit of 6084
+            max_pixels = 23500000
+            w, h = image.size
+            if w * h > max_pixels:
+                scale = (max_pixels / (w * h)) ** 0.5
+                image = image.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+                logger.info(f"Image resized from {w}x{h} to {int(w*scale)}x{int(h*scale)}")
+
             image_size = image.size
+
 
             buffer = io.BytesIO()
             image.save(buffer, format='JPEG', quality=95, optimize=True, subsampling=0)
             buffer.seek(0)
             image_encode = base64.b64encode(buffer.read()).decode("utf-8")
+            image.close()
+            buffer.close()
             logger.info("Image retrieved successfully")
             return image_encode, image_size
 
@@ -164,8 +176,6 @@ def get_layout_vis_bytes(result, quality=60, scale=0.5):
     buf = io.BytesIO()
     img.save(buf, format='JPEG', quality=quality, optimize=True)
     return buf.getvalue()
-
-
 
 def log_error(pid, e, task, error_count, consecutive_errors, error_results):
     error_count += 1
@@ -244,6 +254,7 @@ with GlmOcr(config_path="glmocr-config.yaml") as parser:
                 # cleanup layout dir after writing to zip:
                 if result.layout_vis_dir:
                     shutil.rmtree(result.layout_vis_dir, ignore_errors=True)
+                del image_enc, result, vis
 
                 # remove task from redis queue
                 complete_task(task)
