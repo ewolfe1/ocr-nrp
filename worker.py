@@ -15,7 +15,10 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 import redis
+# logging
 import logging
+import tracemalloc
+tracemalloc.start()
 
 # Redis queue with improved error handling
 def get_redis_connection():
@@ -153,7 +156,7 @@ def ocr_and_hocr(json_result, image_size, pid, page_id="page_1"):
     return ocr, hocr
 
 # resize and save layout vis
-def get_layout_vis_bytes(result, quality=60, scale=0.5):
+def get_layout_vis_bytes(result, quality=60, scale=0.8):
     if not result.layout_vis_dir:
         return None
     vis_dir = Path(result.layout_vis_dir)
@@ -258,6 +261,12 @@ with GlmOcr(config_path="glmocr-config.yaml") as parser:
 
                 # remove task from redis queue
                 complete_task(task)
+
+                # logging - looking for memory leak
+                snapshot = tracemalloc.take_snapshot()
+                top_stats = snapshot.statistics('lineno')
+                for stat in top_stats[:3]:
+                    logger.info(f"Memory: {stat}")
 
                 processed_count += 1
                 consecutive_errors = 0  # Reset error counter on success
