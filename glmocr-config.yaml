@@ -76,7 +76,7 @@ pipeline:
   # Page loader: handles image/PDF loading and API request building
   page_loader:
     # Generation parameters
-    max_tokens: 16384 # changed from 4096
+    max_tokens: 8192 # changed from 4096
     temperature: 0.8
     top_p: 0.9
     top_k: 50
