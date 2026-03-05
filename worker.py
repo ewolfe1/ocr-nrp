@@ -26,13 +26,13 @@ def get_next_task():
     try:
         r = get_redis_connection()
         # Move from main queue to processing queue (atomic operation)
-        result = r.brpoplpush('newspaper-jobs', 'newspaper-jobs:processing', timeout=60)
+        result = r.brpoplpush('archival-ocr', 'archival-ocr:processing', timeout=60)
         if result:
             return json.loads(result.decode('utf-8'))
         else:
             # Check if both queues are empty
-            main_queue_length = r.llen('newspaper-jobs')
-            processing_queue_length = r.llen('newspaper-jobs:processing')
+            main_queue_length = r.llen('archival-ocr')
+            processing_queue_length = r.llen('archival-ocr:processing')
             logger.info(f"Queue status: main={main_queue_length}, processing={processing_queue_length}")
 
             if main_queue_length == 0 and processing_queue_length == 0:
@@ -57,7 +57,7 @@ def complete_task(task):
     try:
         r = get_redis_connection()
         task_str = json.dumps(task, sort_keys=True)
-        removed = r.lrem('newspaper-jobs:processing', 1, task_str)
+        removed = r.lrem('archival-ocr:processing', 1, task_str)
     except Exception as e:
         logger.warning(f"Could not complete task {task.get('pid', 'unknown')}: {str(e)}")
 
@@ -67,9 +67,9 @@ def fail_task(task):
         r = get_redis_connection()
         task_str = json.dumps(task, sort_keys=True)
         # Remove from processing queue
-        r.lrem('newspaper-jobs:processing', 1, task_str)
+        r.lrem('archival-ocr:processing', 1, task_str)
         # Add back to main queue for retry (optional)
-        r.lpush('newspaper-jobs', task_str)
+        r.lpush('archival-ocr', task_str)
         logger.debug(f"Task {task['pid']} marked as failed")
     except Exception as e:
         logger.warning(f"Could not fail task {task.get('pid', 'unknown')}: {str(e)}")
@@ -278,8 +278,8 @@ logger.info(f"Worker {worker_id} completed. Processed: {processed_count}, Errors
 # Final queue status check
 try:
     r = get_redis_connection()
-    main_remaining = r.llen('newspaper-jobs')
-    processing_remaining = r.llen('newspaper-jobs:processing')
+    main_remaining = r.llen('archival-ocr')
+    processing_remaining = r.llen('archival-ocr:processing')
     logger.info(f"Final queue status: main={main_remaining}, processing={processing_remaining}")
 except:
     pass
