@@ -23,7 +23,7 @@ tracemalloc.start()
 # Redis queue with improved error handling
 def get_redis_connection():
     redis_host = os.environ.get('REDIS_HOST', 'redis-service')
-    return redis.Redis(host=redis_host, port=6379, db=0, socket_timeout=10, socket_connect_timeout=10)
+    return redis.Redis(host=redis_host, port=6379, db=0, socket_timeout=None, socket_connect_timeout=10)
 
 def get_next_task():
     """Get next PID from queue using BRPOPLPUSH for safety"""
@@ -82,9 +82,8 @@ def fail_task(task):
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-
 # get image from Islandora and return encoded string
-def get_encoded_image(pid, max_retries=5, max_pixels=23500000):
+def get_encoded_image(pid, max_retries=5):
     url = f'https://digital.lib.ku.edu/islandora/object/{pid}/datastream/OBJ/view'
     for attempt in range(max_retries):
         try:
@@ -93,12 +92,18 @@ def get_encoded_image(pid, max_retries=5, max_pixels=23500000):
             image = Image.open(io.BytesIO(response.content))
             if image.mode != 'RGB':
                 image = image.convert('RGB')
-            w, h = image.size
-            if w * h > max_pixels:
-                scale = (max_pixels / (w * h)) ** 0.5
-                image = image.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-                logger.info(f"Image resized from {w}x{h} to {int(w*scale)}x{int(h*scale)}")
-            image_size = image.size
+            image_size = image.size  # capture for later rescaling
+
+            # resizing for better capture / model limits
+            if 'bee' in pid:
+                new_w = 1200
+            else:
+                new_w = 1600
+            if image.width > new_w:
+                new_h = int(image.height * new_w / image.width)
+                image = image.resize((new_w, new_h), Image.LANCZOS)
+                logger.info(f"Image resized to {image.size}")
+
             buffer = io.BytesIO()
             image.save(buffer, format='JPEG', quality=95, optimize=True, subsampling=0)
             buffer.seek(0)
@@ -106,7 +111,7 @@ def get_encoded_image(pid, max_retries=5, max_pixels=23500000):
             image.close()
             buffer.close()
             logger.info("Image retrieved successfully")
-            return image_encode, image_size
+            return image_encode, image_size  # original size for correct hOCR bbox scaling
         except Exception as e:
             if attempt == max_retries - 1:
                 raise
@@ -156,7 +161,7 @@ def ocr_and_hocr(json_result, image_size, pid, page_id="page_1"):
     return ocr, hocr
 
 # resize and save layout vis
-def get_layout_vis_bytes(result, quality=60, scale=0.8):
+def get_layout_vis_bytes(result, quality=60, scale=1):
     if not result.layout_vis_dir:
         return None
     vis_dir = Path(result.layout_vis_dir)
@@ -168,7 +173,7 @@ def get_layout_vis_bytes(result, quality=60, scale=0.8):
     w, h = img.size
     img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
     buf = io.BytesIO()
-    img.save(buf, format='JPEG', quality=quality, optimize=True)
+    img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
     return buf.getvalue()
 
 def log_error(pid, e, task, error_count, consecutive_errors, error_results):
@@ -228,20 +233,22 @@ with GlmOcr(config_path="glmocr-config.yaml") as parser:
                 pid = task['pid']
                 logger.info(f"Processing {pid} (task {processed_count + 1})")
 
-                max_pixels = 23500000
                 while True:
                     # retrieve and encode image
-                    image_enc, image_size = get_encoded_image(pid, max_pixels=max_pixels)
+                    image_enc, image_size = get_encoded_image(pid)
                     try:
                         # process with glmocr
                         result = parser.parse(f"data:image/jpeg;base64,{image_enc}")
                         break
                     except Exception as e:
-                        if '6084' in str(e) or 'encoder cache' in str(e):
-                            max_pixels = int(max_pixels * 0.85)
-                            logger.info(f"Token limit hit, retrying with max_pixels={max_pixels}")
-                        else:
-                            raise
+                        consecutive_errors, error_count, error_results = log_error(pid, e, task, error_count, consecutive_errors, error_results)
+                        logger.info(f'Failed on parsing: {e}')
+                        if consecutive_errors >= 10:
+                            logger.error("Too many consecutive errors, exiting")
+                            with open(f"/shared-output/errors_{worker_id}_{timestamp}.json", "w") as errs:
+                                json.dump(error_results, errs)
+                            break
+                        continue
 
                 # save outputs
                 ocr_text, hocr_text = ocr_and_hocr(result.json_result[0], image_size, pid)

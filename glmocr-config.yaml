@@ -76,7 +76,7 @@ pipeline:
   # Page loader: handles image/PDF loading and API request building
   page_loader:
     # Generation parameters
-    max_tokens: 8192 # changed from 4096
+    max_tokens: 12288 # changed from 4096
     temperature: 0.8
     top_p: 0.9
     top_k: 50
@@ -85,7 +85,7 @@ pipeline:
     # Image processing
     t_patch_size: 2
     patch_expand_factor: 1
-    image_expect_length: 6144
+    image_expect_length: 12288 # changed from 6144
     image_format: JPEG # JPEG, PNG, WEBP
     min_pixels: 12544 # 112 * 112
     max_pixels: 71372800 # 14 * 14 * 4 * 1280
@@ -153,7 +153,7 @@ pipeline:
     model_dir: PaddlePaddle/PP-DocLayoutV3_safetensors
 
     # Detection threshold
-    threshold: 0.3
+    threshold: 0.2
     # threshold_by_class:           # per-class threshold override
     #   0: 0.5
     #   1: 0.3
@@ -178,7 +178,7 @@ pipeline:
     layout_merge_bboxes_mode:
       0: large # abstract
       1: large # algorithm
-      2: large # aside_text
+      2: small # aside_text
       3: large # chart
       4: large # content
       5: large # display_formula
