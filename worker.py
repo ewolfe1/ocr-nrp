@@ -61,7 +61,7 @@ def complete_task(task):
     try:
         r = get_redis_connection()
         task_str = json.dumps(task, sort_keys=True)
-        removed = r.lrem('archival-ocr:processing', 1, task_str)
+        r.lrem('archival-ocr:processing', 1, task_str)
     except Exception as e:
         logger.warning(f"Could not complete task {task.get('pid', 'unknown')}: {str(e)}")
 
@@ -161,7 +161,7 @@ def ocr_and_hocr(json_result, image_size, pid, page_id="page_1"):
     return ocr, hocr
 
 # resize and save layout vis
-def get_layout_vis_bytes(result, quality=60, scale=1):
+def get_layout_vis_bytes(result, quality=60, scale=0.9):
     if not result.layout_vis_dir:
         return None
     vis_dir = Path(result.layout_vis_dir)
@@ -196,6 +196,11 @@ def log_error(pid, e, task, error_count, consecutive_errors, error_results):
 # Setup output files
 worker_id = os.environ.get('HOSTNAME', 'worker-unknown')
 
+def new_zip(worker_id):
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S%f')
+    path = f"/shared-output/{worker_id}_{timestamp}.zip"
+    return zipfile.ZipFile(path, 'a'), 0, timestamp  # returns (zf, count, timestamp)
+
 # Ensure output directory exists
 os.makedirs('/shared-output', exist_ok=True)
 
@@ -210,89 +215,96 @@ error_results = []
 task = None
 pid = None
 
-timestamp = datetime.now().strftime('%Y%m%d_%H%M%S%f')
+ZIP_LIMIT = 500 # 500 pids per zip file
+
 with GlmOcr(config_path="glmocr-config.yaml") as parser:
-    with zipfile.ZipFile(f"/shared-output/{worker_id}_{timestamp}.zip", 'a') as zf:
+    # with zipfile.ZipFile(f"/shared-output/{worker_id}_{timestamp}.zip", 'a') as zf:
+    zf, zip_count, timestamp = new_zip(worker_id)
 
-        while True:
+    while True:
 
-            try:
-                # Get next task
-                task = get_next_task()
+        try:
+            # Get next task
+            task = get_next_task()
 
-                if task == "QUEUE_EMPTY":
-                    logger.info("Queue is empty, worker exiting")
+            if task == "QUEUE_EMPTY":
+                logger.info("Queue is empty, worker exiting")
+                break
+            elif task == "REDIS_ERROR":
+                logger.error("Redis connection issues, worker exiting")
+                sys.exit(1)
+            elif task is None:
+                logger.info("No tasks available, waiting...")
+                time.sleep(10)  # Wait before checking again
+                continue
+
+            pid = task['pid']
+            logger.info(f"Processing {pid} (task {processed_count + 1})")
+
+            while True:
+                # retrieve and encode image
+                image_enc, image_size = get_encoded_image(pid)
+                try:
+                    # process with glmocr
+                    result = parser.parse(f"data:image/jpeg;base64,{image_enc}")
                     break
-                elif task == "REDIS_ERROR":
-                    logger.error("Redis connection issues, worker exiting")
-                    sys.exit(1)
-                elif task is None:
-                    logger.info("No tasks available, waiting...")
-                    time.sleep(10)  # Wait before checking again
+                except Exception as e:
+                    consecutive_errors, error_count, error_results = log_error(pid, e, task, error_count, consecutive_errors, error_results)
+                    logger.info(f'Failed on parsing: {e}')
+                    if consecutive_errors >= 10:
+                        logger.error("Too many consecutive errors, exiting")
+                        with open(f"/shared-output/errors_{worker_id}_{timestamp}.json", "w") as errs:
+                            json.dump(error_results, errs)
+                        sys.exit(1)
                     continue
 
-                pid = task['pid']
-                logger.info(f"Processing {pid} (task {processed_count + 1})")
+            # save outputs
+            ocr_text, hocr_text = ocr_and_hocr(result.json_result[0], image_size, pid)
+            fn = pid.replace(':','_')
+            zf.writestr(f"{fn}_ocr.txt", ocr_text)
+            zf.writestr(f"{fn}_hocr.html", hocr_text)
+            zf.writestr(f"{fn}_data.json", json.dumps(result.json_result))
+            vis = get_layout_vis_bytes(result)
+            if vis:
+                zf.writestr(f"{fn}_layout.jpg", vis)
 
-                while True:
-                    # retrieve and encode image
-                    image_enc, image_size = get_encoded_image(pid)
-                    try:
-                        # process with glmocr
-                        result = parser.parse(f"data:image/jpeg;base64,{image_enc}")
-                        break
-                    except Exception as e:
-                        consecutive_errors, error_count, error_results = log_error(pid, e, task, error_count, consecutive_errors, error_results)
-                        logger.info(f'Failed on parsing: {e}')
-                        if consecutive_errors >= 10:
-                            logger.error("Too many consecutive errors, exiting")
-                            with open(f"/shared-output/errors_{worker_id}_{timestamp}.json", "w") as errs:
-                                json.dump(error_results, errs)
-                            break
-                        continue
+            # cleanup layout dir after writing to zip:
+            if result.layout_vis_dir:
+                shutil.rmtree(result.layout_vis_dir, ignore_errors=True)
+            del image_enc, result, vis
+            gc.collect()
 
-                # save outputs
-                ocr_text, hocr_text = ocr_and_hocr(result.json_result[0], image_size, pid)
-                fn = pid.replace(':','_')
-                zf.writestr(f"{fn}_ocr.txt", ocr_text)
-                zf.writestr(f"{fn}_hocr.html", hocr_text)
-                zf.writestr(f"{fn}_data.json", json.dumps(result.json_result))
-                vis = get_layout_vis_bytes(result)
-                if vis:
-                    zf.writestr(f"{fn}_layout.jpg", vis)
+            # remove task from redis queue
+            complete_task(task)
 
-                # cleanup layout dir after writing to zip:
-                if result.layout_vis_dir:
-                    shutil.rmtree(result.layout_vis_dir, ignore_errors=True)
-                del image_enc, result, vis
-                gc.collect()
+            zip_count += 1
+            if zip_count >= ZIP_LIMIT:
+                zf.close()
+                zf, zip_count, timestamp = new_zip(worker_id)
 
-                # remove task from redis queue
-                complete_task(task)
+            # logging - looking for memory leak
+            snapshot = tracemalloc.take_snapshot()
+            top_stats = snapshot.statistics('lineno')
+            for stat in top_stats[:3]:
+                logger.info(f"Memory: {stat}")
 
-                # logging - looking for memory leak
-                snapshot = tracemalloc.take_snapshot()
-                top_stats = snapshot.statistics('lineno')
-                for stat in top_stats[:3]:
-                    logger.info(f"Memory: {stat}")
+            processed_count += 1
+            consecutive_errors = 0  # Reset error counter on success
+            logger.info(f"Successfully processed {pid} ({processed_count} total)")
 
-                processed_count += 1
-                consecutive_errors = 0  # Reset error counter on success
-                logger.info(f"Successfully processed {pid} ({processed_count} total)")
+        except KeyboardInterrupt:
+            logger.info("Worker interrupted by user")
+            break
 
-            except KeyboardInterrupt:
-                logger.info("Worker interrupted by user")
-                break
-
-            except Exception as e:
-                consecutive_errors, error_count, error_results = log_error(pid, e, task, error_count, consecutive_errors, error_results)
-                logger.info(e)
-                if consecutive_errors >= 10:
-                    logger.error("Too many consecutive errors, exiting")
-                    with open(f"/shared-output/errors_{worker_id}_{timestamp}.json", "w") as errs:
-                        json.dump(error_results, errs)
-                    break
-                continue
+        except Exception as e:
+            consecutive_errors, error_count, error_results = log_error(pid, e, task, error_count, consecutive_errors, error_results)
+            logger.info(e)
+            if consecutive_errors >= 10:
+                logger.error("Too many consecutive errors, exiting")
+                with open(f"/shared-output/errors_{worker_id}_{timestamp}.json", "w") as errs:
+                    json.dump(error_results, errs)
+                sys.exit(1)
+            continue
 
 # Final save and summary
 logger.info("Saving final results...")
@@ -302,6 +314,7 @@ if error_results:
         json.dump(error_results, errs)
 
 logger.info(f"Worker {worker_id} completed. Processed: {processed_count}, Errors: {error_count}")
+zf.close()
 
 # Final queue status check
 try:
