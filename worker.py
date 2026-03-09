@@ -173,7 +173,8 @@ def get_layout_vis_bytes(result, quality=60, scale=1):
     w, h = img.size
     img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
     buf = io.BytesIO()
-    img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+    img.save(buf, format='JPEG', quality=quality)
+    buf.seek(0)
     return buf.getvalue()
 
 def log_error(pid, e, task, error_count, consecutive_errors, error_results):
