@@ -161,15 +161,29 @@ def ocr_and_hocr(json_result, image_size, pid, page_id="page_1"):
     return ocr, hocr
 
 # resize and save layout vis
+# older version
+# def get_layout_vis_bytes(result, quality=60, scale=0.9):
+#     vis_dir = getattr(result, 'layout_vis_dir', None)
+#     if not vis_dir:
+#         return None
+#     candidates = sorted(Path(vis_dir).glob("layout_page*.*"))
+#     if not candidates:
+#         return None
+#     img = Image.open(candidates[0])
+#     w, h = img.size
+#     img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+#     buf = io.BytesIO()
+#     img.save(buf, format='JPEG', quality=quality)
+#     buf.seek(0)
+#     return buf.getvalue()
+
+# newer
 def get_layout_vis_bytes(result, quality=60, scale=0.9):
-    if not result.layout_vis_dir:
+    vis_images = getattr(result, 'layout_vis_images', None)
+    if not vis_images:
         return None
-    vis_dir = Path(result.layout_vis_dir)
-    # single page = layout_page0.jpg
-    candidates = sorted(vis_dir.glob("layout_page*.*"))
-    if not candidates:
-        return None
-    img = Image.open(candidates[0])
+    # Single-page input → one entry, page_idx 0
+    img = next(iter(vis_images.values()))
     w, h = img.size
     img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
     buf = io.BytesIO()
@@ -269,8 +283,6 @@ with GlmOcr(config_path="glmocr-config.yaml") as parser:
                 zf.writestr(f"{fn}_layout.jpg", vis)
 
             # cleanup layout dir after writing to zip:
-            if result.layout_vis_dir:
-                shutil.rmtree(result.layout_vis_dir, ignore_errors=True)
             del image_enc, result, vis
             gc.collect()
 
